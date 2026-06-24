@@ -105,7 +105,7 @@ def _save_extraction(extraction, grid, out_dir: Path) -> None:
 
 
 def predict_grid(
-    cell_model, bgr_image, source: str = "<upload>", save_dir: Path | None = None
+    cell_model, bgr_image, save_dir: Path | None = None
 ) -> list[list[int]]:
     extraction = extract_grid(bgr_image)
 
@@ -114,9 +114,6 @@ def predict_grid(
         row, col = divmod(index, 9)
         cell_pil = Image.fromarray(cell.image).convert("RGB")
         grid[row][col] = predict_cell(cell_model, cell_pil)
-
-    logger.info("predicted grid for %s:", source)
-    print_grid(grid)
 
     if save_dir is not None:
         _save_extraction(extraction, grid, save_dir)
@@ -146,7 +143,7 @@ async def solve_sudoku(file: UploadFile = File(...), debug: bool = False):
     source = file.filename or "upload"
     save_dir = Path("out/solve") / Path(source).stem if debug else None
     try:
-        grid = predict_grid(cell_model, bgr_image, source=source, save_dir=save_dir)
+        grid = predict_grid(cell_model, bgr_image, save_dir=save_dir)
     except GridNotFoundError:
         raise HTTPException(status_code=422, detail="No Sudoku grid found in the image")
 
