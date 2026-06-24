@@ -17,3 +17,5 @@ notebooks/
 .python-version
 
 *.pth
+
+out/
