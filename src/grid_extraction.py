@@ -62,6 +62,10 @@ def extract_grid(image, keep_stages = False) -> GridExtraction:
         gray = image
         color = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
+    # if polarity is reversed, invert to dark digits on light background
+    if _is_light_on_dark(gray):
+        gray = cv2.bitwise_not(gray)
+
     stages = {}
 
     # some robustness stuff
@@ -131,6 +135,17 @@ def extract_grid(image, keep_stages = False) -> GridExtraction:
         cells=cells,
         stages=stages,
     )
+
+
+def _is_light_on_dark(gray) -> bool:
+    h, w = gray.shape[:2]
+    y0, y1 = int(h * 0.2), int(h * 0.8)
+    x0, x1 = int(w * 0.2), int(w * 0.8)
+    center = gray[y0:y1, x0:x1]
+    blur = cv2.GaussianBlur(center, (5, 5), 0)
+    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright_fraction = float(cv2.countNonZero(mask)) / mask.size
+    return bright_fraction < 0.5
 
 
 def _warp_destination() -> np.ndarray:
@@ -284,6 +299,11 @@ def _refine_corners(normalized, corners) -> np.ndarray:
 def _locate_grid(binary, blurred) -> np.ndarray | None:
     min_area = MIN_GRID_AREA_RATIO * binary.size
 
+    # pad when the grid is close to the edge of the image, so that the contour can be closed
+    pad = max(8, int(0.02 * max(binary.shape[:2])))
+    binary = cv2.copyMakeBorder(binary, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    blurred = cv2.copyMakeBorder(blurred, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+
     closed = cv2.morphologyEx(
         binary, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     )
@@ -291,18 +311,27 @@ def _locate_grid(binary, blurred) -> np.ndarray | None:
     contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
 
     for contour in contours:
-        if cv2.contourArea(contour) < min_area:
+        area = cv2.contourArea(contour)
+        if area < min_area:
             break
         perimeter = cv2.arcLength(contour, True)
         for epsilon in (0.02, 0.05, 0.1):
             quad = cv2.approxPolyDP(contour, epsilon * perimeter, True)
             if len(quad) == 4 and cv2.isContourConvex(quad):
-                return quad.reshape(4, 2).astype(np.float32)
+                return quad.reshape(4, 2).astype(np.float32) - pad
+
+        # A grid whose outer border is faint can not to reduce to a clean quad, even though
+        # this contour clearly is the grid. Its min-area rect still spans the
+        # full grid extent, so use that (square-ish and grid-sized)
+        rect = cv2.minAreaRect(contour)
+        rw, rh = rect[1]
+        if rw > 0 and rh > 0 and rw * rh >= min_area and 0.5 < rw / rh < 2.0:
+            return cv2.boxPoints(rect).astype(np.float32) - pad
 
     corners = _corners_from_hough(blurred, min_area)
     if corners is not None:
-        return corners
-    
+        return corners - pad
+
     return None
 
 

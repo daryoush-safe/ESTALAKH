@@ -27,7 +27,11 @@ def load_finetuned_model(device):
 def load_model(device=None):
     """Load the finetuned model ready for inference (correct device, eval mode)."""
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device(
+            "cuda" if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available()
+            else "cpu"
+        )
     model = load_finetuned_model(device)
     model.to(device)
     model.eval()

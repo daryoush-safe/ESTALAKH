@@ -17,5 +17,6 @@ notebooks/
 .python-version
 
 *.pth
+*.bak
 
 out/
