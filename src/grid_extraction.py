@@ -10,12 +10,16 @@ import numpy as np
 
 WARP_SIZE = 450
 CELL_SIZE = WARP_SIZE // 9
+
+WARP_MARGIN = CELL_SIZE // 2
+GRID_SPAN = WARP_SIZE - 1 - 2 * WARP_MARGIN
 DIGIT_SIZE = 224
 MAX_DETECT_DIM = 1024  # downsample target for grid detection (block size 11 is good for 500–1024px images)
 
 
 MIN_DIGIT_AREA_RATIO = 0.015
 MIN_DIGIT_HEIGHT_RATIO = 0.25
+
 CELL_MARGIN_RATIO = 0.12
 MIN_GRID_AREA_RATIO = 0.05 
 
@@ -36,7 +40,6 @@ class GridNotFoundError(RuntimeError):
 class Cell:
     image: np.ndarray
     is_empty: bool
-    ink_ratio: float
 
 
 @dataclass
@@ -44,8 +47,9 @@ class GridExtraction:
     corners: np.ndarray # 4x2 float32 (tl, tr, br, bl) in the source image
     matrix: np.ndarray # perspective: source -> warped
     inverse_matrix: np.ndarray  # perspective: warped -> source (Phase 4)
-    warped: np.ndarray 
+    warped: np.ndarray
     cells: list[Cell] # row major
+    cell_quads: np.ndarray | None = None
     stages: dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
@@ -124,7 +128,7 @@ def extract_grid(image, keep_stages = False) -> GridExtraction:
     inverse_matrix = np.linalg.inv(matrix)
 
     warped = cv2.warpPerspective(normalized, matrix, (WARP_SIZE, WARP_SIZE))
-    cells, warp_stages = _process_warp(warped, keep_stages=keep_stages)
+    cells, cell_quads, warp_stages = _process_warp(warped, keep_stages=keep_stages)
     stages.update(warp_stages)
 
     return GridExtraction(
@@ -133,6 +137,7 @@ def extract_grid(image, keep_stages = False) -> GridExtraction:
         inverse_matrix=inverse_matrix,
         warped=warped,
         cells=cells,
+        cell_quads=cell_quads,
         stages=stages,
     )
 
@@ -149,9 +154,10 @@ def _is_light_on_dark(gray) -> bool:
 
 
 def _warp_destination() -> np.ndarray:
-    # get the corners of the warped grid in the order (tl, tr, br, bl)
+    # corners of the warped grid in the order (tl, tr, br, bl), inset by WARP_MARGIN
+    low, high = WARP_MARGIN, WARP_SIZE - 1 - WARP_MARGIN
     return np.array(
-        [[0, 0], [WARP_SIZE - 1, 0], [WARP_SIZE - 1, WARP_SIZE - 1], [0, WARP_SIZE - 1]],
+        [[low, low], [high, low], [high, high], [low, high]],
         dtype=np.float32,
     )
 
@@ -176,25 +182,39 @@ def _process_warp(warped, keep_stages=False):
     row_bounds = _grid_boundaries(horizontal_lines, axis=1)
     col_bounds = _grid_boundaries(vertical_lines, axis=0)
 
-    cells = [
-        _extract_cell(line_free, warped, row_bounds, col_bounds, row, col)
-        for row in range(9)
-        for col in range(9)
-    ]
+    # local cell for situations like page fold
+    quads, quad_stages = _detect_cell_quads(
+        warped_binary, row_bounds, col_bounds,
+        visual_base=warped if keep_stages else None,
+    )
+
+    if quads is not None:
+        cells = [_extract_cell_quad(line_free, warped, quad) for quad in quads]
+    else:
+        cells = [
+            _extract_cell(line_free, warped, row_bounds, col_bounds, row, col)
+            for row in range(9)
+            for col in range(9)
+        ]
 
     stages = {}
     if keep_stages:
         stages["06_warped"] = warped
         stages["07_warped_binary"] = warped_binary
         stages["08_lines_removed"] = line_free
+        stages.update(quad_stages)
         cell_grid = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
-        for bound in row_bounds:
-            cv2.line(cell_grid, (0, int(bound)), (WARP_SIZE, int(bound)), (0, 255, 0), 1)
-        for bound in col_bounds:
-            cv2.line(cell_grid, (int(bound), 0), (int(bound), WARP_SIZE), (0, 255, 0), 1)
+        if quads is not None:
+            polys = [quad.astype(np.int32) for quad in quads]
+            cv2.polylines(cell_grid, polys, True, (0, 255, 0), 1)
+        else:
+            for bound in row_bounds:
+                cv2.line(cell_grid, (0, int(bound)), (WARP_SIZE, int(bound)), (0, 255, 0), 1)
+            for bound in col_bounds:
+                cv2.line(cell_grid, (int(bound), 0), (int(bound), WARP_SIZE), (0, 255, 0), 1)
         stages["09_cell_grid"] = cell_grid
 
-    return cells, stages
+    return cells, quads, stages
 
 
 
@@ -221,7 +241,7 @@ def rotate_extraction(extraction: GridExtraction, label: int, keep_stages: bool 
     new_matrix = rot @ extraction.matrix  # source -> old warp -> upright warp
     new_inverse = np.linalg.inv(new_matrix)
 
-    cells, warp_stages = _process_warp(new_warped, keep_stages=keep_stages)
+    cells, cell_quads, warp_stages = _process_warp(new_warped, keep_stages=keep_stages)
 
     new_stages = {}
     if keep_stages:
@@ -237,6 +257,7 @@ def rotate_extraction(extraction: GridExtraction, label: int, keep_stages: bool 
         inverse_matrix=new_inverse,
         warped=new_warped,
         cells=cells,
+        cell_quads=cell_quads,
         stages=new_stages,
     )
 
@@ -426,7 +447,7 @@ def _grid_boundaries(lines_mask, axis) -> np.ndarray:
     bounds = np.empty(10, dtype=int)
 
     for index in range(10):
-        expected = min(index * CELL_SIZE, WARP_SIZE - 1)
+        expected = int(round(WARP_MARGIN + index * GRID_SPAN / 9))
         low = max(0, expected - search)
         window = profile[low : min(WARP_SIZE, expected + search + 1)]
 
@@ -438,32 +459,139 @@ def _grid_boundaries(lines_mask, axis) -> np.ndarray:
     return np.maximum.accumulate(bounds)
 
 
-def _extract_cell(line_free, warped, row_bounds, col_bounds, row, col,) -> Cell:
+def _line_mask(binary) -> np.ndarray:
+    thicken = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+    run = cv2.getStructuringElement(cv2.MORPH_RECT, (CELL_SIZE // 2, 1))
+    opened = cv2.morphologyEx(cv2.dilate(binary, thicken), cv2.MORPH_OPEN, run)
 
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    keep = stats[:, cv2.CC_STAT_WIDTH] >= CELL_SIZE
+    keep[0] = False  # background
+    return np.where(keep[labels], 255, 0).astype(np.uint8)
+
+
+def _trace_curve(mask, expected):
+    half = CELL_SIZE // 2 - 4
+    lo = max(0, int(expected) - half)
+    hi = min(WARP_SIZE, int(expected) + half + 1)
+    band = mask[lo:hi] > 0
+    counts = band.sum(axis=0)
+    sampled = counts > 0
+    if sampled.sum() < 0.35 * WARP_SIZE:
+        return None
+    rows = np.arange(lo, hi, dtype=np.float64)[:, None]
+    centers = (band * rows).sum(axis=0)[sampled] / counts[sampled]
+    fit = np.polyfit(np.nonzero(sampled)[0], centers, 2)
+    curve = np.polyval(fit, np.arange(WARP_SIZE))
+    return np.clip(curve, lo, hi - 1)
+
+
+def _trace_lines(mask, bounds) -> tuple[np.ndarray, int]:
+    curves, traced = [], 0
+    for expected in bounds:
+        curve = _trace_curve(mask, expected)
+        traced += curve is not None
+        curves.append(curve if curve is not None else np.full(WARP_SIZE, float(expected)))
+    # neighbouring lines must never cross
+    return np.maximum.accumulate(np.stack(curves), axis=0), traced
+
+
+def _detect_cell_quads(warped_binary, row_bounds, col_bounds, visual_base=None):
+    h_mask = _line_mask(warped_binary)
+    v_mask = _line_mask(warped_binary.T).T
+
+    h_curves, h_traced = _trace_lines(h_mask, row_bounds)
+    v_curves, v_traced = _trace_lines(v_mask.T, col_bounds)
+
+    stages = {}
+    if visual_base is not None:
+        stages["08a_line_masks"] = _draw_line_masks(h_mask, v_mask)
+
+    if h_traced + v_traced < 8:
+        return None, stages  # the uniform split is just as good
+
+    # node (i, j) = where horizontal curve i crosses vertical curve j
+    nodes = np.empty((10, 10, 2), dtype=np.float32)
+    for i in range(10):
+        for j in range(10):
+            y = float(row_bounds[i])
+            for _ in range(2):
+                x = v_curves[j][int(y)]
+                y = h_curves[i][int(x)]
+            nodes[i, j] = (x, y)
+
+    if visual_base is not None:
+        stages["08b_line_curves"] = _draw_line_curves(visual_base, h_curves, v_curves, nodes)
+
+    tl, tr = nodes[:-1, :-1], nodes[:-1, 1:]
+    bl, br = nodes[1:, :-1], nodes[1:, 1:]
+    quads = np.stack([tl, tr, br, bl], axis=2).reshape(81, 4, 2)
+    return quads, stages
+
+
+def _draw_line_masks(h_mask, v_mask) -> np.ndarray:
+    image = np.zeros((*h_mask.shape, 3), np.uint8)
+    image[h_mask > 0] = (0, 255, 0)
+    image[v_mask > 0] = (0, 0, 255)
+    image[(h_mask > 0) & (v_mask > 0)] = (0, 255, 255)
+    return image
+
+
+def _draw_line_curves(base, h_curves, v_curves, nodes) -> np.ndarray:
+    image = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+    span = np.arange(WARP_SIZE)
+    for curve in h_curves:
+        cv2.polylines(image, [np.stack([span, curve], axis=1).astype(np.int32)], False, (0, 255, 0), 1)
+    for curve in v_curves:
+        cv2.polylines(image, [np.stack([curve, span], axis=1).astype(np.int32)], False, (0, 0, 255), 1)
+    for point in nodes.reshape(-1, 2).astype(int):
+        cv2.circle(image, tuple(point), 3, (255, 0, 255), -1)
+    return image
+
+
+def _extract_cell_quad(line_free, warped, quad) -> Cell:
+    destination = np.array(
+        [[0, 0], [CELL_SIZE - 1, 0], [CELL_SIZE - 1, CELL_SIZE - 1], [0, CELL_SIZE - 1]],
+        dtype=np.float32,
+    )
+    homography = cv2.getPerspectiveTransform(quad, destination)
+    line_free_patch = cv2.warpPerspective(
+        line_free, homography, (CELL_SIZE, CELL_SIZE), flags=cv2.INTER_NEAREST
+    )
+    gray_patch = cv2.warpPerspective(warped, homography, (CELL_SIZE, CELL_SIZE))
+    return _cell_from_patch(line_free_patch, gray_patch)
+
+
+def _extract_cell(line_free, warped, row_bounds, col_bounds, row, col,) -> Cell:
     y0, y1 = row_bounds[row], row_bounds[row + 1]
     x0, x1 = col_bounds[col], col_bounds[col + 1]
-    y0, y1 = y0 + int((y1 - y0) * CELL_MARGIN_RATIO), y1 - int((y1 - y0) * CELL_MARGIN_RATIO)
-    x0, x1 = x0 + int((x1 - x0) * CELL_MARGIN_RATIO), x1 - int((x1 - x0) * CELL_MARGIN_RATIO)
+    return _cell_from_patch(line_free[y0:y1, x0:x1], warped[y0:y1, x0:x1])
+
+
+def _cell_from_patch(line_free_patch, gray_patch) -> Cell:
+    height, width = line_free_patch.shape[:2]
+    y0, y1 = int(height * CELL_MARGIN_RATIO), height - int(height * CELL_MARGIN_RATIO)
+    x0, x1 = int(width * CELL_MARGIN_RATIO), width - int(width * CELL_MARGIN_RATIO)
     if y1 - y0 < 8 or x1 - x0 < 8:
-        return Cell(np.zeros((DIGIT_SIZE, DIGIT_SIZE), np.uint8), True, 0.0)
-    
-    interior = line_free[y0:y1, x0:x1]
-    ink_ratio = float(cv2.countNonZero(interior)) / interior.size
+        return Cell(np.zeros((DIGIT_SIZE, DIGIT_SIZE), np.uint8), True)
+
+    interior = line_free_patch[y0:y1, x0:x1]
 
     digit_mask = _find_digit_mask(interior)
     if digit_mask is None:
-        return Cell(np.zeros((DIGIT_SIZE, DIGIT_SIZE), np.uint8), True, ink_ratio)
+        return Cell(np.zeros((DIGIT_SIZE, DIGIT_SIZE), np.uint8), True)
 
     # crop the digit from the warped *grayscale*: a binary mask fills the
     # holes of 6/8/9 under noise, grayscale keeps them visible for Phase 2
     ys, xs = np.nonzero(digit_mask)
     pad = 3
-    gy0, gy1 = max(0, y0 + ys.min() - pad), min(WARP_SIZE, y0 + ys.max() + 1 + pad)
-    gx0, gx1 = max(0, x0 + xs.min() - pad), min(WARP_SIZE, x0 + xs.max() + 1 + pad)
-    mask_full = np.zeros(line_free.shape, np.uint8)
+    gy0, gy1 = max(0, y0 + ys.min() - pad), min(height, y0 + ys.max() + 1 + pad)
+    gx0, gx1 = max(0, x0 + xs.min() - pad), min(width, x0 + xs.max() + 1 + pad)
+
+    mask_full = np.zeros((height, width), np.uint8)
     mask_full[y0:y1, x0:x1] = digit_mask
-    digit = _normalize_digit(warped[gy0:gy1, gx0:gx1], mask_full[gy0:gy1, gx0:gx1])
-    return Cell(digit, False, ink_ratio)
+    digit = _normalize_digit(gray_patch[gy0:gy1, gx0:gx1], mask_full[gy0:gy1, gx0:gx1])
+    return Cell(digit, False)
 
 
 def _find_digit_mask(interior) -> np.ndarray | None:

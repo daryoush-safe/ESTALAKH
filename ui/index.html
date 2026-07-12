@@ -420,7 +420,9 @@
       <section class="stage" id="s4">
         <div class="stage-head"><span class="tag">Stage 05</span><h2>Line removal</h2></div>
         <p class="stage-desc">Long morphological kernels erase the grid lines; per-cell
-          connected-component filtering sweeps up the residue, leaving only digits.</p>
+          connected-component filtering sweeps up the residue, leaving only digits. On a
+          curled page the lines are also traced as curves and intersected into the 81
+          real cell quads, so cells stay aligned where the paper bends.</p>
         <div class="cards c2" id="c-lines"></div>
       </section>
 
@@ -626,6 +628,8 @@ const STAGE_LABELS = {
   "06_warped":["Upright warp","450×450 bird's-eye view"],
   "07_warped_binary":["Warp binary","re-thresholded warp"],
   "08_lines_removed":["Lines removed","digits only"],
+  "08a_line_masks":["Line masks","curvature-tolerant line evidence"],
+  "08b_line_curves":["Traced curves","fitted grid lines + cell corners"],
   "09_cell_grid":["Cell boundaries","81-cell split"],
 };
 const b64 = s => `data:image/png;base64,${s}`;
@@ -665,7 +669,7 @@ function renderAll(r) {
   fillCards("#c-preprocess", stageCards(stages, ["01_gray","02_clahe","03_denoised","04_binary"]));
   fillCards("#c-detect",     stageCards(stages, ["05_grid_outline"]));
   fillCards("#c-warp",       stageCards(stages, ["06_warped","07_warped_binary"]));
-  fillCards("#c-lines",      stageCards(stages, ["08_lines_removed","09_cell_grid"]));
+  fillCards("#c-lines",      stageCards(stages, ["08_lines_removed","08a_line_masks","08b_line_curves","09_cell_grid"]));
 
   const rb = $("#rot-badge"); rb.hidden = false;
   rb.textContent = r.orientation?.degrees ? `rotated ${r.orientation.degrees}° — corrected` : "already upright";
