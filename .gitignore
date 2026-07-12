@@ -20,3 +20,12 @@ notebooks/
 *.bak
 
 out/
+
+*.onnx
+*.data
+*.pt
+
+GRID_EXTRACTION.md
+
+onnx*.py
+*.ttf

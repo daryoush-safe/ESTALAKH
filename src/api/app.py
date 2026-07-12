@@ -26,16 +26,19 @@ logger = logging.getLogger("sudoku.api")
 
 ml: dict[str, torch.nn.Module] = {}
 
+ENGLISH_RECOGNITION_KEY = "english_recognition"
+PERSIAN_RECOGNITION_KEY = "persian_recognition"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    dv = (
+    device = (
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
-    ml["recognition"] = load_model()
-    ml["orientation_warp"] = load_orientation_model(str(DEFAULT_WARP_CHECKPOINT), device=dv)
+    ml[ENGLISH_RECOGNITION_KEY], ml[PERSIAN_RECOGNITION_KEY] = load_model(device=device)
+    # ml["orientation_warp"] = load_orientation_model(str(DEFAULT_WARP_CHECKPOINT), device=device)
     yield
     ml.clear()
 
@@ -64,8 +67,9 @@ def health():
 
 @app.post("/predict/cell")
 async def predict(file: UploadFile = File(...)):
-    model = ml.get("recognition")
-    if model is None:
+    english_model = ml.get(ENGLISH_RECOGNITION_KEY)
+    persian_model = ml.get(PERSIAN_RECOGNITION_KEY)
+    if english_model is None or persian_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -77,7 +81,7 @@ async def predict(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read image: {exc}")
 
-    predicted_class = predict_cell(model, image)
+    predicted_class = predict_cell(english_model, image)
 
     return {"predicted_class": predicted_class}
 
@@ -95,16 +99,22 @@ def _save_extraction(extraction, grid, out_dir: Path) -> None:
     logger.info("saved extraction to %s", out_dir)
 
 
-def predict_grid(cell_model, extraction: GridExtraction) -> tuple[list[list[int]], list[list[float]]]:
+def predict_grid(persian_model, extraction: GridExtraction) -> tuple[list[list[int]], list[list[float]]]:
     grid = [[0] * 9 for _ in range(9)]
     confidences = [[0.0] * 9 for _ in range(9)]
     for index, cell in enumerate(extraction.cells):
         row, col = divmod(index, 9)
         cell_pil = Image.fromarray(cell.image).convert("RGB")
-        value, conf = predict_cell_proba(cell_model, cell_pil)
+        value, conf = predict_cell_proba(persian_model, cell_pil)
         grid[row][col] = value
         confidences[row][col] = conf
     return grid, confidences
+
+
+def _grid_score(grid: list[list[int]], confidences: list[list[float]]) -> tuple[int, float]:
+    values = [confidences[r][c] for r in range(9) for c in range(9) if grid[r][c] != 0]
+    avg_confidence = sum(values) / len(values) if values else 0.0
+    return len(values), avg_confidence
 
 
 def _encode_image(image: np.ndarray) -> str:
@@ -116,10 +126,10 @@ def _encode_image(image: np.ndarray) -> str:
 
 @app.post("/solve")
 async def solve_sudoku(file: UploadFile = File(...), debug: bool = False, stages: bool = False):
-    cell_model = ml.get("recognition")
-    if cell_model is None:
+    persian_model = ml.get(PERSIAN_RECOGNITION_KEY)
+    english_model = ml.get(ENGLISH_RECOGNITION_KEY)
+    if persian_model is None or english_model is None:
         raise HTTPException(status_code=503, detail="Recognition model not loaded yet")
-    orientation_model = ml.get("orientation_warp")
 
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -137,14 +147,25 @@ async def solve_sudoku(file: UploadFile = File(...), debug: bool = False, stages
         raise HTTPException(status_code=422, detail="No Sudoku grid found in the image")
 
 
-    orientation_label = 0
-    if orientation_model is not None:
-        orientation_label = resolve_orientation(
-            extraction, recognition_model=cell_model, orientation_model=orientation_model
-        )
-        extraction = rotate_extraction(extraction, orientation_label, keep_stages=stages)
+    english_orientation_label = 0
+    persian_orientation_label = 0
+    english_orientation_label = resolve_orientation(extraction, recognition_model=english_model)
+    persian_orientation_label = resolve_orientation(extraction, recognition_model=persian_model)
+    
+    english_extraction = rotate_extraction(extraction, english_orientation_label, keep_stages=stages)
+    persian_extraction = rotate_extraction(extraction, persian_orientation_label, keep_stages=stages)
 
-    grid, confidences = predict_grid(cell_model, extraction)
+    english_grid, english_confidences = predict_grid(english_model, english_extraction)
+    persian_grid, persian_confidences = predict_grid(persian_model, persian_extraction)
+    
+    if _grid_score(english_grid, english_confidences) >= _grid_score(persian_grid, persian_confidences):
+        grid, confidences = english_grid, english_confidences
+        orientation_label = english_orientation_label
+        language = "english"
+    else:
+        grid, confidences = persian_grid, persian_confidences
+        orientation_label = persian_orientation_label
+        language = "persian"
 
     source = file.filename or "upload"
     if debug:
@@ -158,6 +179,7 @@ async def solve_sudoku(file: UploadFile = File(...), debug: bool = False, stages
         "confidences": confidences,
         "given_mask": given_mask,
         "solution": solution,
+        "language": language,
         "orientation": {"label": orientation_label, "degrees": _DEGREES[orientation_label]},
     }
 
@@ -168,7 +190,7 @@ async def solve_sudoku(file: UploadFile = File(...), debug: bool = False, stages
         response["error"] = "Could not solve the recognized grid — likely a misread digit."
         return response
 
-    overlay_image = render_solution(bgr_image, extraction, solution, given_mask)
+    overlay_image = render_solution(bgr_image, extraction, solution, given_mask, language=language)
     response["overlay_image"] = _encode_image(overlay_image)
     return response
 

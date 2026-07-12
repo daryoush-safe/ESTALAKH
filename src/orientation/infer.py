@@ -135,28 +135,16 @@ def _score_rotation(extraction, model):
     return _count_conflicts(grid), mean_conf
 
 
-def resolve_orientation(extraction, recognition_model=None, checkpoint=None, orientation_model=None):
+def resolve_orientation(extraction, recognition_model):
     from src.grid_extraction import rotate_extraction
 
-    if orientation_model is not None:
-        cnn_label, _probs = predict_warp_orientation(orientation_model, extraction.warped)
-    else:
-        classifier = (
-            WarpOrientationClassifier(checkpoint) if checkpoint else WarpOrientationClassifier()
-        )
-        cnn_label, _probs = classifier.predict(extraction.warped)
-
-    if recognition_model is None:
-        return cnn_label
-
-    best = None
+    best_label, best_conf = 0, -1.0
     for j in range(4):
         candidate = extraction if j == 0 else rotate_extraction(extraction, j)
-        conflicts, mean_conf = _score_rotation(candidate, recognition_model)
-        score = (-conflicts, mean_conf, 1 if j == cnn_label else 0)
-        if best is None or score > best[0]:
-            best = (score, j)
-    return best[1]
+        _, mean_conf = _score_rotation(candidate, recognition_model)
+        if mean_conf > best_conf:
+            best_label, best_conf = j, mean_conf
+    return best_label
 
 
 def predict_orientation(model, image, device=None):

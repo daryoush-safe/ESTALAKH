@@ -2,9 +2,10 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torchvision.models import EfficientNet_B1_Weights, efficientnet_b1
+from torchvision.models import EfficientNet_B1_Weights, efficientnet_b1, EfficientNet
 
-MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_model.pth"
+ENGLISH_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_model_english.pth"
+PERSIAN_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_model_persian.pth"
 
 
 def load_base_model():
@@ -18,21 +19,25 @@ def load_base_model():
     return model
 
 
-def load_finetuned_model(device):
+def load_english_finetuned_model(device):
     model = load_base_model()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(ENGLISH_MODEL_PATH, map_location=device))
     return model
 
 
-def load_model(device=None):
-    """Load the finetuned model ready for inference (correct device, eval mode)."""
+def load_persian_finetuned_model(device):
+    model = load_base_model()
+    model.load_state_dict(torch.load(PERSIAN_MODEL_PATH, map_location=device))
+    return model
+
+
+def load_model(device=None) -> tuple[EfficientNet, EfficientNet]:
     if device is None:
         device = torch.device(
             "cuda" if torch.cuda.is_available()
             else "mps" if torch.backends.mps.is_available()
             else "cpu"
         )
-    model = load_finetuned_model(device)
-    model.to(device)
-    model.eval()
-    return model
+    english_model = load_english_finetuned_model(device)
+    persian_model = load_persian_finetuned_model(device)
+    return english_model, persian_model
