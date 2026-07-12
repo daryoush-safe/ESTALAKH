@@ -14,18 +14,16 @@ transform = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))
 ])
 
+
 def predict_cell(model, image):
-    model.to(device)
-    tensor = transform(image).unsqueeze(0).to(device)
-    model.eval()
-    with torch.no_grad():
-        logits = model(tensor)
-        probs = F.softmax(logits, dim=1)
-        predicted_class = torch.argmax(probs, dim=1).item()
-    return predicted_class
+    return predict_cell_proba(model, image)[0]
 
 
 def predict_cell_proba(model, image):
+    if not isinstance(model, torch.nn.Module):
+        from src.recognition.onnx_infer import predict_cell_proba as predict_cell_proba_onnx
+        return predict_cell_proba_onnx(model, image)
+
     model.to(device)
     tensor = transform(image).unsqueeze(0).to(device)
     model.eval()

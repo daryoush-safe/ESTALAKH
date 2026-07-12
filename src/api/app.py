@@ -1,6 +1,5 @@
 import base64
 import io
-import logging
 from contextlib import asynccontextmanager
 
 import cv2
@@ -15,29 +14,33 @@ from pathlib import Path
 
 from src.grid_extraction import GridExtraction, GridNotFoundError, cell_montage, extract_grid, rotate_extraction
 from src.orientation.infer import DEFAULT_WARP_CHECKPOINT, _DEGREES, resolve_orientation
-from src.orientation.model import load_model as load_orientation_model
 from src.overlay import render_solution
 from src.recognition.infer import predict_cell, predict_cell_proba
-from src.recognition.model import load_model
+from src.recognition.model import load_model as load_torch_recognition_model
 from src.solver import solve
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("sudoku.api")
 
-ml: dict[str, torch.nn.Module] = {}
+ml: dict[str, object] = {}
 
 ENGLISH_RECOGNITION_KEY = "english_recognition"
 PERSIAN_RECOGNITION_KEY = "persian_recognition"
 
+RECOGNITION_BACKEND = "onnx"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    device = (
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
-    ml[ENGLISH_RECOGNITION_KEY], ml[PERSIAN_RECOGNITION_KEY] = load_model(device=device)
+    if RECOGNITION_BACKEND == "onnx":
+        from src.recognition.onnx_infer import load_model as load_onnx_recognition_model
+
+        ml[ENGLISH_RECOGNITION_KEY], ml[PERSIAN_RECOGNITION_KEY] = load_onnx_recognition_model()
+    else:
+        device = (
+            "cuda" if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        ml[ENGLISH_RECOGNITION_KEY], ml[PERSIAN_RECOGNITION_KEY] = load_torch_recognition_model(device=device)
     # ml["orientation_warp"] = load_orientation_model(str(DEFAULT_WARP_CHECKPOINT), device=device)
     yield
     ml.clear()
@@ -96,7 +99,6 @@ def _save_extraction(extraction, grid, out_dir: Path) -> None:
     for index, cell in enumerate(extraction.cells):
         row, col = divmod(index, 9)
         cv2.imwrite(str(cells_dir / f"r{row}c{col}_pred{grid[row][col]}.png"), cell.image)
-    logger.info("saved extraction to %s", out_dir)
 
 
 def predict_grid(persian_model, extraction: GridExtraction) -> tuple[list[list[int]], list[list[float]]]:
